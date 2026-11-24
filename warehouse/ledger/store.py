@@ -3,6 +3,7 @@ from os import PathLike
 
 from ..calibration.groups import create_group_offset_schema
 from ..calibration.overrides import create_override_schema
+from ..edits.schema import create_edit_extract_schema
 from ..ingest.batch_store import create_batch_schema
 from ..ingest.observations import create_observation_schema
 from ..reports.archive import create_report_schema
@@ -21,6 +22,7 @@ def initialize_store(db: sqlite3.Connection) -> None:
         create_group_offset_schema(db)
         create_override_schema(db)
         create_report_schema(db)
+        create_edit_extract_schema(db)
 
 
 def open_store(path: str | PathLike[str]) -> sqlite3.Connection:

@@ -2,6 +2,8 @@
 
 from .calibration.audit import read_correction_audit as read_correction_audit
 from .calibration.updates import set_offsets as set_offsets
+from .edits.apply import apply_extract as apply_extract
+from .edits.issuance import issue_edit_extract as issue_edit_extract
 from .ingest.accept import accept_batch as accept_batch
 from .ingest.batch_store import find_batch as find_batch
 from .ingest.batch_store import load_batch_payload as load_batch_payload

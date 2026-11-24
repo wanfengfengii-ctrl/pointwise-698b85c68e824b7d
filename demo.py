@@ -6,11 +6,15 @@ from tempfile import TemporaryDirectory
 from warehouse import (
     Observation,
     accept_batch,
+    apply_extract,
     find_batch,
+    get_day_head,
     inspect_day,
+    issue_edit_extract,
     issue_report,
     load_batch_payload,
     open_store,
+    read_correction_audit,
     read_report,
     set_offsets,
 )
@@ -93,5 +97,94 @@ def main():
             )
 
 
+def show_edit_scenario():
+    # Separate working store so the V1 scenarios above keep their exact data.
+    with TemporaryDirectory(prefix='chengwan-demo-edit-') as directory:
+        path = Path(directory) / 'edit-warehouse.sqlite3'
+        with closing(open_store(path)) as db:
+            first = accept_batch(db, 'morning', DAY, [
+                Observation('A', 'G', 'probe', 100, False),
+                Observation('B', 'G', 'probe', 100, True),
+                Observation('C', 'G', 'probe', 100, True),
+            ])
+            issued = issue_edit_extract(db, first, ['C', 'A', 'C'])
+            require_result(issued['lines'],
+                           [['probe', 100], ['probe', 100], ['probe', 100]])
+            receipt = apply_extract(db, 'req-A-110', issued['extract_id'], [(1, 110)])
+            corrected = receipt['revision']
+            corrected_day = inspect_day(db, DAY, corrected, 0)
+            require_result(
+                [[row.occurrence_id, row.value] for row in corrected_day.rows],
+                [['A', 110], ['B', 100], ['C', 100]],
+            )
+            audit = read_correction_audit(db, corrected)
+            require_result([(group, value) for group, value in audit.group_offsets],
+                           [('G', 10)])
+            # The day head continues after the correction; the extract binding
+            # remains valid for replay afterwards.
+            advanced = set_offsets(db, DAY, corrected)
+            first_receipt = receipt
+
+        with closing(open_store(path)) as db:
+            replayed = apply_extract(db, 'req-A-110', issued['extract_id'], [(1, 110)])
+            require_result(replayed, first_receipt)
+            # Replays publish nothing and do not move the day head.
+            head_after_replay = get_day_head(db, DAY)
+            require_result(head_after_replay, advanced)
+            # The first correction revision still reads the fixed corrected day.
+            fixed = inspect_day(db, DAY, corrected, 0)
+            require_result(
+                [[row.occurrence_id, row.value] for row in fixed.rows],
+                [['A', 110], ['B', 100], ['C', 100]],
+            )
+            ordinary = issue_report(db, DAY, first, ['A'])
+            ordinary_reprint = [[line.label, line.value]
+                                for line in read_report(db, ordinary.report_id).lines]
+            require_result(ordinary_reprint, [['probe', 100]])
+            fixed_table = [[row.occurrence_id, row.value] for row in fixed.rows]
+
+        print('POINTWISE_SCENARIO ' + json.dumps({
+        'case_id': 'edit-A-110',
+        'input': {'day': DAY, 'selection': ['C', 'A', 'C'], 'edits': [[1, 110]]},
+        'expected': {
+            'receipt': {
+                'revision': corrected,
+                'group_offsets': {'G': [0, 10]},
+                'overrides': {'B': [None, 0], 'C': [None, 0]},
+            },
+            'day_table': [['A', 110], ['B', 100], ['C', 100]],
+        },
+        'actual': {
+            'receipt': first_receipt,
+            'day_table': [[row.occurrence_id, row.value] for row in corrected_day.rows],
+        },
+        'downstream_expected': {
+            'replay_receipt': first_receipt,
+            'head_after_replay': advanced,
+            'fixed_first_correction': [['A', 110], ['B', 100], ['C', 100]],
+            'ordinary_reprint': [['probe', 100]],
+        },
+        'downstream_actual': {
+            'replay_receipt': replayed,
+            'head_after_replay': head_after_replay,
+            'fixed_first_correction': fixed_table,
+            'ordinary_reprint': ordinary_reprint,
+        },
+        'code_paths': ['warehouse/edits/issuance.py', 'warehouse/edits/apply.py',
+                       'warehouse/edits/planning.py', 'warehouse/edits/schema.py',
+                       'warehouse/calibration/audit.py', 'warehouse/quality/effective.py'],
+        'oracle': (
+            'Locked A can only move through group offset G 0->10. B and C are override-eligible, '
+            'so the write set pins each with an explicit zero override; missing old overrides are '
+            'reported as null, distinct from the new explicit zero. The actual write set therefore '
+            'touches only the G group offset plus the B/C override rows, and every unlisted '
+            'occurrence keeps its value even when its group moves. Replaying the same request id '
+            'after the head advanced and after reopening returns the first receipt without a new '
+            'revision.'
+        ),
+    }, ensure_ascii=False))
+
+
 if __name__ == '__main__':
     main()
+    show_edit_scenario()
